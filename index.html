@@ -359,19 +359,21 @@
         // ---- Video workflow: cut the silent segments out of the actual video using ffmpeg.wasm ----
         async function processVideo(regions, sampleRate) {
             try {
-                if (!ffmpeg) {
+                if (!ffmpeg || !ffmpeg.isLoaded()) {
                     elements.status.innerText = "Loading Video Engine...";
-                    const { createFFmpeg } = FFmpeg;
-                    ffmpeg = createFFmpeg({
-                        log: false,
-                        corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
-                    });
-                    ffmpeg.setProgress(({ ratio }) => {
-                        if (ratio >= 0 && ratio <= 1) {
-                            elements.progressBar.style.width = `${40 + ratio * 60}%`;
-                            elements.status.innerText = "Trimming & Encoding Video...";
-                        }
-                    });
+                    if (!ffmpeg) {
+                        const { createFFmpeg } = FFmpeg;
+                        ffmpeg = createFFmpeg({
+                            log: false,
+                            corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+                        });
+                        ffmpeg.setProgress(({ ratio }) => {
+                            if (ratio >= 0 && ratio <= 1) {
+                                elements.progressBar.style.width = `${40 + ratio * 60}%`;
+                                elements.status.innerText = "Trimming & Encoding Video...";
+                            }
+                        });
+                    }
                     await ffmpeg.load();
                 }
 
@@ -422,9 +424,10 @@
                 ffmpeg.FS('unlink', outputName);
             } catch (err) {
                 console.error(err);
-                elements.status.innerText = "Error: Video processing failed.";
+                elements.status.innerText = "Error: " + (err && err.message ? err.message : String(err));
                 elements.controls.classList.remove('hidden');
-                elements.progressArea.classList.add('hidden');
+                // Deliberately NOT hiding progressArea here -- the status line above
+                // is the only place the real error message is shown.
             }
         }
 
