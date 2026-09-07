@@ -123,11 +123,10 @@
         </div>
     </div>
 
-    <!-- Background Worker Script (LameJS included inside) -->
+    <!-- Background Worker Script (LameJS is loaded lazily below, only when needed) -->
     <script id="worker-script" type="application/javascript">
-        importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
-
         self.onmessage = function(e) {
+          try {
             const { channels, sampleRate, threshold, minSilenceSamples, mode } = e.data;
             const data = channels[0];
             const length = data.length;
@@ -166,11 +165,15 @@
             }
 
             // Video workflow only needs the regions (in samples) + sampleRate to build
-            // ffmpeg trim points -- no need to touch lamejs/mp3 encoding at all.
+            // ffmpeg trim points -- no need to touch lamejs/mp3 encoding at all, so we
+            // never even fetch that library for video jobs.
             if (detectOnly) {
                 self.postMessage({ type: 'done', regions, sampleRate });
                 return;
             }
+
+            // lamejs is only needed for the audio->mp3 path, so fetch it lazily right here.
+            importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
             // 2. MP3 Encoding
             const numChannels = channels.length;
@@ -216,6 +219,9 @@
                 regions: regions,
                 finalDuration: totalSamplesToProcess / sampleRate 
             });
+          } catch (err) {
+            self.postMessage({ type: 'error', message: 'Worker failed: ' + (err && err.message ? err.message : err) });
+          }
         };
     </script>
 
@@ -310,6 +316,13 @@
                 minSilenceSamples: parseFloat(elements.minSilenceInput.value) * originalBuffer.sampleRate,
                 mode: isVideoMode ? 'detect' : 'audio'
             });
+
+            worker.onerror = (err) => {
+                console.error(err);
+                elements.status.innerText = "Error: " + (err.message || "Processing failed unexpectedly.");
+                elements.controls.classList.remove('hidden');
+                worker.terminate();
+            };
 
             worker.onmessage = (e) => {
                 if (e.data.type === 'progress') {
