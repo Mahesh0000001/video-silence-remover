@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Silence Remover</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="manifest" href="https://progressier.app/IivECWlhQHJnNoBN69Ib/progressier.json"/>
+    <script src="https://progressier.app/IivECWlhQHJnNoBN69Ib/script.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- Used only for the video workflow: cuts the silent segments out of the actual video track -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: #f7f9fc;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .android-card {
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            border-radius: 28px;
+        }
+        .loader {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #6200ee;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        canvas {
+            width: 100%;
+            height: 100px;
+            background: #f1f1f1;
+            border-radius: 16px;
+        }
+        .progress-container {
+            width: 100%;
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background: #6200ee;
+            width: 0%;
+            transition: width 0.2s ease;
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 flex justify-center items-start min-h-screen">
+
+    <div class="max-w-md w-full bg-white android-card p-6 md:p-8">
+        <header class="flex justify-between items-center mb-8">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-800">Silence Remover</h1>
+                <p class="text-sm text-gray-500 mt-1">Background processing enabled.</p>
+            </div>
+            <button id="cancelBtn" class="hidden text-gray-400 hover:text-red-500 p-2 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </header>
+
+        <!-- Upload Area -->
+        <div id="dropZone" class="border-2 border-dashed border-purple-200 rounded-3xl p-8 text-center cursor-pointer hover:border-purple-400 transition-colors mb-6">
+            <input type="file" id="audioInput" accept="audio/*,video/*" class="hidden">
+            <div class="flex flex-col items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-purple-600 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+                </svg>
+                <span class="text-gray-700 font-medium text-sm">Select Audio or Video (Up to 2h)</span>
+                <span id="fileNameLabel" class="text-xs text-gray-400 mt-1"></span>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div id="controls" class="hidden space-y-6">
+            <div class="bg-gray-50 p-4 rounded-2xl">
+                <div class="flex justify-between items-center mb-2">
+                    <label class="text-xs font-bold text-gray-500">Sensitivity</label>
+                    <span id="thresholdVal" class="text-xs font-mono text-purple-600 font-bold">0.01</span>
+                </div>
+                <input type="range" id="threshold" min="0.001" max="0.1" step="0.001" value="0.01" class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer">
+            </div>
+
+            <div class="bg-gray-50 p-4 rounded-2xl">
+                <div class="flex justify-between items-center mb-2">
+                    <label class="text-xs font-bold text-gray-500">Min Pause Duration</label>
+                    <span id="minSilenceVal" class="text-xs font-mono text-purple-600 font-bold">0.3s</span>
+                </div>
+                <input type="range" id="minSilence" min="0.1" max="3.0" step="0.1" value="0.3" class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer">
+            </div>
+
+            <button id="processBtn" class="w-full py-4 bg-purple-600 text-white rounded-2xl font-bold text-lg shadow-lg hover:bg-purple-700 transition-all flex justify-center items-center gap-3">
+                <span>Remove Silence</span>
+            </button>
+        </div>
+
+        <!-- Progress Area -->
+        <div id="progressArea" class="hidden mt-6 space-y-4">
+            <div class="progress-container">
+                <div id="progressBar" class="progress-bar"></div>
+            </div>
+            <p id="status" class="text-center text-xs font-medium text-gray-500 uppercase tracking-widest"></p>
+        </div>
+
+        <!-- Result Area -->
+        <div id="resultArea" class="hidden mt-8 border-t pt-6">
+            <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 text-center">Trimmed Preview</h3>
+            <canvas id="waveformCanvas" class="mb-4"></canvas>
+            <audio id="audioPlayer" controls class="w-full mb-4"></audio>
+            <video id="videoPlayer" controls class="w-full mb-4 rounded-2xl hidden"></video>
+            <button id="downloadBtn" class="w-full py-3 bg-gray-800 text-white rounded-2xl font-bold hover:bg-black transition-colors mb-2">
+                Download MP3
+            </button>
+        </div>
+    </div>
+
+    <!-- Background Worker Script (LameJS included inside) -->
+    <script id="worker-script" type="application/javascript">
+        importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
+
+        self.onmessage = function(e) {
+            const { channels, sampleRate, threshold, minSilenceSamples, mode } = e.data;
+            const data = channels[0];
+            const length = data.length;
+            const detectOnly = mode === 'detect'; // used for the video workflow
+
+            // 1. Detect Silence
+            const regions = [];
+            let isAudible = false;
+            let start = 0;
+            let silenceCounter = 0;
+
+            for (let i = 0; i < length; i++) {
+                const amp = Math.abs(data[i]);
+                if (amp > threshold) {
+                    if (!isAudible) {
+                        start = i;
+                        isAudible = true;
+                    }
+                    silenceCounter = 0;
+                } else {
+                    if (isAudible) {
+                        silenceCounter++;
+                        if (silenceCounter > minSilenceSamples) {
+                            regions.push({ start, end: i - silenceCounter });
+                            isAudible = false;
+                        }
+                    }
+                }
+                if (i % 100000 === 0) self.postMessage({ type: 'progress', value: (i / length) * (detectOnly ? 100 : 30) });
+            }
+            if (isAudible) regions.push({ start, end: length });
+
+            if (regions.length === 0) {
+                self.postMessage({ type: 'error', message: 'No audible parts found.' });
+                return;
+            }
+
+            // Video workflow only needs the regions (in samples) + sampleRate to build
+            // ffmpeg trim points -- no need to touch lamejs/mp3 encoding at all.
+            if (detectOnly) {
+                self.postMessage({ type: 'done', regions, sampleRate });
+                return;
+            }
+
+            // 2. MP3 Encoding
+            const numChannels = channels.length;
+            const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, 128);
+            const mp3Data = [];
+            
+            let processedSamples = 0;
+            const totalSamplesToProcess = regions.reduce((acc, r) => acc + (r.end - r.start), 0);
+            const sampleBlockSize = 1152;
+
+            for (const region of regions) {
+                const regionLen = region.end - region.start;
+                for (let i = 0; i < regionLen; i += sampleBlockSize) {
+                    const endIdx = Math.min(i + sampleBlockSize, regionLen);
+                    
+                    const left = new Int16Array(endIdx - i);
+                    const right = numChannels > 1 ? new Int16Array(endIdx - i) : null;
+
+                    for (let j = 0; j < (endIdx - i); j++) {
+                        const idx = region.start + i + j;
+                        left[j] = channels[0][idx] < 0 ? channels[0][idx] * 32768 : channels[0][idx] * 32767;
+                        if (right) {
+                            right[j] = channels[1][idx] < 0 ? channels[1][idx] * 32768 : channels[1][idx] * 32767;
+                        }
+                    }
+
+                    const mp3buf = right ? mp3encoder.encodeBuffer(left, right) : mp3encoder.encodeBuffer(left);
+                    if (mp3buf.length > 0) mp3Data.push(mp3buf);
+                    
+                    processedSamples += (endIdx - i);
+                    if (processedSamples % 50000 === 0) {
+                        self.postMessage({ type: 'progress', value: 30 + (processedSamples / totalSamplesToProcess) * 65 });
+                    }
+                }
+            }
+
+            const flushBuf = mp3encoder.flush();
+            if (flushBuf.length > 0) mp3Data.push(flushBuf);
+
+            self.postMessage({ 
+                type: 'done', 
+                data: mp3Data, 
+                regions: regions,
+                finalDuration: totalSamplesToProcess / sampleRate 
+            });
+        };
+    </script>
+
+    <script>
+        const elements = {
+            audioInput: document.getElementById('audioInput'),
+            dropZone: document.getElementById('dropZone'),
+            controls: document.getElementById('controls'),
+            processBtn: document.getElementById('processBtn'),
+            cancelBtn: document.getElementById('cancelBtn'),
+            status: document.getElementById('status'),
+            progressArea: document.getElementById('progressArea'),
+            progressBar: document.getElementById('progressBar'),
+            resultArea: document.getElementById('resultArea'),
+            audioPlayer: document.getElementById('audioPlayer'),
+            downloadBtn: document.getElementById('downloadBtn'),
+            canvas: document.getElementById('waveformCanvas'),
+            thresholdInput: document.getElementById('threshold'),
+            minSilenceInput: document.getElementById('minSilence'),
+            thresholdVal: document.getElementById('thresholdVal'),
+            minSilenceVal: document.getElementById('minSilenceVal'),
+            videoPlayer: document.getElementById('videoPlayer'),
+            fileNameLabel: document.getElementById('fileNameLabel')
+        };
+
+        let originalBuffer;
+        let processedBlob;
+        let isVideoMode = false;
+        let originalFile = null; // kept so ffmpeg can read the real video bytes (audio track is only used for silence detection)
+        let ffmpeg = null; // lazy-loaded, only for video jobs
+
+        elements.thresholdInput.oninput = () => elements.thresholdVal.innerText = elements.thresholdInput.value;
+        elements.minSilenceInput.oninput = () => elements.minSilenceVal.innerText = elements.minSilenceInput.value + 's';
+        elements.dropZone.onclick = () => elements.audioInput.click();
+        elements.cancelBtn.onclick = () => window.location.reload();
+
+        elements.audioInput.onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            isVideoMode = file.type.startsWith('video/');
+            originalFile = file;
+            elements.processBtn.querySelector('span').innerText = 'Remove Silence';
+            elements.fileNameLabel.innerText = file.name;
+            elements.downloadBtn.innerText = 'Download MP3';
+            elements.resultArea.classList.add('hidden');
+            elements.videoPlayer.classList.add('hidden');
+            elements.audioPlayer.classList.remove('hidden');
+            elements.canvas.classList.remove('hidden');
+
+            elements.dropZone.classList.add('hidden');
+            elements.progressArea.classList.remove('hidden');
+            elements.cancelBtn.classList.remove('hidden');
+            elements.status.innerText = isVideoMode ? "Decoding Audio Track..." : "Decoding Audio File...";
+
+            try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                // decodeAudioData pulls the audio track out of a video file too (Chrome/Edge/Firefox).
+                const arrayBuffer = await file.arrayBuffer();
+                originalBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+                elements.progressArea.classList.add('hidden');
+                elements.controls.classList.remove('hidden');
+                elements.status.innerText = "";
+            } catch (err) {
+                elements.status.innerText = isVideoMode
+                    ? "Error: Could not read an audio track from this video."
+                    : "Error: Invalid audio format.";
+            }
+        };
+
+        elements.processBtn.onclick = () => {
+            if (!originalBuffer) return;
+
+            elements.controls.classList.add('hidden');
+            elements.progressArea.classList.remove('hidden');
+            elements.progressBar.style.width = '0%';
+            elements.status.innerText = "Initializing Engine...";
+
+            const channels = [];
+            for (let i = 0; i < originalBuffer.numberOfChannels; i++) {
+                channels.push(originalBuffer.getChannelData(i));
+            }
+
+            const workerBlob = new Blob([document.getElementById('worker-script').textContent], { type: 'application/javascript' });
+            const worker = new Worker(URL.createObjectURL(workerBlob));
+
+            worker.postMessage({
+                channels: channels,
+                sampleRate: originalBuffer.sampleRate,
+                threshold: parseFloat(elements.thresholdInput.value),
+                minSilenceSamples: parseFloat(elements.minSilenceInput.value) * originalBuffer.sampleRate,
+                mode: isVideoMode ? 'detect' : 'audio'
+            });
+
+            worker.onmessage = (e) => {
+                if (e.data.type === 'progress') {
+                    if (isVideoMode) {
+                        // Detection is phase 1 of 2 for video (0-40%); ffmpeg cutting is phase 2 (40-100%).
+                        elements.progressBar.style.width = `${e.data.value * 0.4}%`;
+                        elements.status.innerText = "Scanning Silence...";
+                    } else {
+                        elements.progressBar.style.width = `${e.data.value}%`;
+                        elements.status.innerText = e.data.value < 35 ? "Scanning Silence..." : "Encoding MP3...";
+                    }
+                } else if (e.data.type === 'done') {
+                    worker.terminate();
+                    if (isVideoMode) {
+                        processVideo(e.data.regions, e.data.sampleRate);
+                    } else {
+                        processedBlob = new Blob(e.data.data, { type: 'audio/mp3' });
+                        const url = URL.createObjectURL(processedBlob);
+
+                        elements.audioPlayer.src = url;
+                        elements.progressBar.style.width = '100%';
+                        elements.status.innerText = "Success!";
+                        elements.resultArea.classList.remove('hidden');
+                        drawWaveform(originalBuffer, e.data.regions);
+                    }
+                } else if (e.data.type === 'error') {
+                    elements.status.innerText = e.data.message;
+                    elements.controls.classList.remove('hidden');
+                    worker.terminate();
+                }
+            };
+        };
+
+        // ---- Video workflow: cut the silent segments out of the actual video using ffmpeg.wasm ----
+        async function processVideo(regions, sampleRate) {
+            try {
+                if (!ffmpeg) {
+                    elements.status.innerText = "Loading Video Engine...";
+                    const { createFFmpeg } = FFmpeg;
+                    ffmpeg = createFFmpeg({
+                        log: false,
+                        corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+                    });
+                    ffmpeg.setProgress(({ ratio }) => {
+                        if (ratio >= 0 && ratio <= 1) {
+                            elements.progressBar.style.width = `${40 + ratio * 60}%`;
+                            elements.status.innerText = "Trimming & Encoding Video...";
+                        }
+                    });
+                    await ffmpeg.load();
+                }
+
+                elements.status.innerText = "Preparing Video...";
+                const ext = (originalFile.name.split('.').pop() || 'mp4').toLowerCase();
+                const inputName = `input.${ext}`;
+                const outputName = 'output.mp4';
+
+                ffmpeg.FS('writeFile', inputName, await FFmpeg.fetchFile(originalFile));
+
+                // Build a trim+concat filter that keeps only the audible regions, in order.
+                const filterParts = [];
+                let concatRefs = '';
+                regions.forEach((r, i) => {
+                    const start = (r.start / sampleRate).toFixed(3);
+                    const end = (r.end / sampleRate).toFixed(3);
+                    filterParts.push(`[0:v]trim=${start}:${end},setpts=PTS-STARTPTS[v${i}]`);
+                    filterParts.push(`[0:a]atrim=${start}:${end},asetpts=PTS-STARTPTS[a${i}]`);
+                    concatRefs += `[v${i}][a${i}]`;
+                });
+                const filterComplex = `${filterParts.join(';')};${concatRefs}concat=n=${regions.length}:v=1:a=1[outv][outa]`;
+
+                elements.status.innerText = "Trimming & Encoding Video...";
+                await ffmpeg.run(
+                    '-i', inputName,
+                    '-filter_complex', filterComplex,
+                    '-map', '[outv]', '-map', '[outa]',
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+                    '-c:a', 'aac',
+                    outputName
+                );
+
+                const data = ffmpeg.FS('readFile', outputName);
+                processedBlob = new Blob([data.buffer], { type: 'video/mp4' });
+                const url = URL.createObjectURL(processedBlob);
+
+                elements.videoPlayer.src = url;
+                elements.videoPlayer.classList.remove('hidden');
+                elements.audioPlayer.classList.add('hidden');
+                elements.canvas.classList.add('hidden');
+                elements.progressBar.style.width = '100%';
+                elements.status.innerText = "Success!";
+                elements.resultArea.classList.remove('hidden');
+                elements.downloadBtn.innerText = 'Download MP4';
+
+                // Free ffmpeg's in-memory FS copies of this job's files.
+                ffmpeg.FS('unlink', inputName);
+                ffmpeg.FS('unlink', outputName);
+            } catch (err) {
+                console.error(err);
+                elements.status.innerText = "Error: Video processing failed.";
+                elements.controls.classList.remove('hidden');
+                elements.progressArea.classList.add('hidden');
+            }
+        }
+
+        function drawWaveform(buffer, regions) {
+            const ctx = elements.canvas.getContext('2d');
+            const data = buffer.getChannelData(0);
+            const step = Math.ceil(data.length / elements.canvas.width);
+            const amp = elements.canvas.height / 2;
+            
+            ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+            ctx.fillStyle = '#9333ea';
+            
+            // This is a simple visual represention of the kept parts
+            for (let i = 0; i < elements.canvas.width; i++) {
+                let max = 0;
+                for (let j = 0; j < step; j++) {
+                    const datum = Math.abs(data[(i * step) + j]);
+                    if (datum > max) max = datum;
+                }
+                ctx.fillRect(i, amp - (max * amp), 1, max * amp * 2);
+            }
+        }
+
+        elements.downloadBtn.onclick = () => {
+            if (!processedBlob) return;
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(processedBlob);
+            link.download = isVideoMode ? "processed_video.mp4" : "processed_audio.mp3";
+            link.click();
+        };
+    </script>
+</body>
+</html>
