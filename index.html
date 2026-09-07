@@ -8,8 +8,9 @@
     <link rel="manifest" href="https://progressier.app/IivECWlhQHJnNoBN69Ib/progressier.json"/>
     <script src="https://progressier.app/IivECWlhQHJnNoBN69Ib/script.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <!-- Used only for the video workflow: cuts the silent segments out of the actual video track -->
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+    <!-- ffmpeg.wasm (v0.12, single-thread core) is loaded lazily via dynamic import()
+         inside processVideo() below -- only needed for the video workflow, and this
+         version doesn't require SharedArrayBuffer/COOP/COEP, so it works on GitHub Pages. -->
     <style>
         body {
             font-family: 'Roboto', sans-serif;
@@ -251,7 +252,8 @@
         let processedBlob;
         let isVideoMode = false;
         let originalFile = null; // kept so ffmpeg can read the real video bytes (audio track is only used for silence detection)
-        let ffmpeg = null; // lazy-loaded, only for video jobs
+        let ffmpeg = null; // lazy-loaded, only for video jobs (ffmpeg.wasm v0.12 FFmpeg instance)
+        let fetchFile = null; // set once @ffmpeg/util is dynamically imported
 
         elements.thresholdInput.oninput = () => elements.thresholdVal.innerText = elements.thresholdInput.value;
         elements.minSilenceInput.oninput = () => elements.minSilenceVal.innerText = elements.minSilenceInput.value + 's';
@@ -357,24 +359,34 @@
         };
 
         // ---- Video workflow: cut the silent segments out of the actual video using ffmpeg.wasm ----
+        // Uses ffmpeg.wasm v0.12's single-thread core, which -- unlike the older 0.11.x
+        // build -- does NOT require SharedArrayBuffer/COOP/COEP headers, so it runs fine
+        // on plain static hosting like GitHub Pages.
         async function processVideo(regions, sampleRate) {
             try {
-                if (!ffmpeg || !ffmpeg.isLoaded()) {
+                if (!ffmpeg || !ffmpeg.loaded) {
                     elements.status.innerText = "Loading Video Engine...";
+                    const [{ FFmpeg }, { toBlobURL, fetchFile: ff }] = await Promise.all([
+                        import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js'),
+                        import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js')
+                    ]);
+                    fetchFile = ff; // stash for use below
+
                     if (!ffmpeg) {
-                        const { createFFmpeg } = FFmpeg;
-                        ffmpeg = createFFmpeg({
-                            log: false,
-                            corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
-                        });
-                        ffmpeg.setProgress(({ ratio }) => {
-                            if (ratio >= 0 && ratio <= 1) {
-                                elements.progressBar.style.width = `${40 + ratio * 60}%`;
+                        ffmpeg = new FFmpeg();
+                        ffmpeg.on('progress', ({ progress }) => {
+                            if (progress >= 0 && progress <= 1) {
+                                elements.progressBar.style.width = `${40 + progress * 60}%`;
                                 elements.status.innerText = "Trimming & Encoding Video...";
                             }
                         });
                     }
-                    await ffmpeg.load();
+
+                    const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+                    await ffmpeg.load({
+                        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+                    });
                 }
 
                 elements.status.innerText = "Preparing Video...";
@@ -382,7 +394,7 @@
                 const inputName = `input.${ext}`;
                 const outputName = 'output.mp4';
 
-                ffmpeg.FS('writeFile', inputName, await FFmpeg.fetchFile(originalFile));
+                await ffmpeg.writeFile(inputName, await fetchFile(originalFile));
 
                 // Build a trim+concat filter that keeps only the audible regions, in order.
                 const filterParts = [];
@@ -397,16 +409,16 @@
                 const filterComplex = `${filterParts.join(';')};${concatRefs}concat=n=${regions.length}:v=1:a=1[outv][outa]`;
 
                 elements.status.innerText = "Trimming & Encoding Video...";
-                await ffmpeg.run(
+                await ffmpeg.exec([
                     '-i', inputName,
                     '-filter_complex', filterComplex,
                     '-map', '[outv]', '-map', '[outa]',
                     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
                     '-c:a', 'aac',
                     outputName
-                );
+                ]);
 
-                const data = ffmpeg.FS('readFile', outputName);
+                const data = await ffmpeg.readFile(outputName);
                 processedBlob = new Blob([data.buffer], { type: 'video/mp4' });
                 const url = URL.createObjectURL(processedBlob);
 
@@ -420,8 +432,8 @@
                 elements.downloadBtn.innerText = 'Download MP4';
 
                 // Free ffmpeg's in-memory FS copies of this job's files.
-                ffmpeg.FS('unlink', inputName);
-                ffmpeg.FS('unlink', outputName);
+                await ffmpeg.deleteFile(inputName);
+                await ffmpeg.deleteFile(outputName);
             } catch (err) {
                 console.error(err);
                 elements.status.innerText = "Error: " + (err && err.message ? err.message : String(err));
