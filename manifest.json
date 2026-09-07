@@ -1,0 +1,16 @@
+{
+  "name": "Silence Remover",
+  "short_name": "SilenceRem",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#6200ee",
+  "theme_color": "#6200ee",
+  "icons": [
+    {
+      "src": "logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
