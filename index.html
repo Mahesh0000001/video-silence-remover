@@ -8,9 +8,6 @@
     <link rel="manifest" href="https://progressier.app/IivECWlhQHJnNoBN69Ib/progressier.json"/>
     <script src="https://progressier.app/IivECWlhQHJnNoBN69Ib/script.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <!-- ffmpeg.wasm (v0.12, single-thread core) is loaded lazily via dynamic import()
-         inside processVideo() below -- only needed for the video workflow, and this
-         version doesn't require SharedArrayBuffer/COOP/COEP, so it works on GitHub Pages. -->
     <style>
         body {
             font-family: 'Roboto', sans-serif;
@@ -251,9 +248,7 @@
         let originalBuffer;
         let processedBlob;
         let isVideoMode = false;
-        let originalFile = null; // kept so ffmpeg can read the real video bytes (audio track is only used for silence detection)
-        let ffmpeg = null; // lazy-loaded, only for video jobs (ffmpeg.wasm v0.12 FFmpeg instance)
-        let fetchFile = null; // set once @ffmpeg/util is dynamically imported
+        let originalFile = null; // kept so we can play the real video for the record-while-skipping-silence pass
 
         elements.thresholdInput.oninput = () => elements.thresholdVal.innerText = elements.thresholdInput.value;
         elements.minSilenceInput.oninput = () => elements.minSilenceVal.innerText = elements.minSilenceInput.value + 's';
@@ -358,89 +353,103 @@
             };
         };
 
-        // ---- Video workflow: cut the silent segments out of the actual video using ffmpeg.wasm ----
-        // Uses ffmpeg.wasm v0.12's single-thread core, which -- unlike the older 0.11.x
-        // build -- does NOT require SharedArrayBuffer/COOP/COEP headers, so it runs fine
-        // on plain static hosting like GitHub Pages.
-        async function processVideo(regions, sampleRate) {
-            try {
-                if (!ffmpeg || !ffmpeg.loaded) {
-                    elements.status.innerText = "Loading Video Engine...";
-                    const [{ FFmpeg }, { toBlobURL, fetchFile: ff }] = await Promise.all([
-                        import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js'),
-                        import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js')
-                    ]);
-                    fetchFile = ff; // stash for use below
+        // ---- Video workflow: play the video, skip over the silent parts, record what's left ----
+        // No external libraries, no CDN downloads, no CORS/SharedArrayBuffer issues --
+        // just the browser's own <video>.captureStream() + MediaRecorder, driven by the
+        // same silence "regions" the audio workflow already computes.
+        function processVideo(regions, sampleRate) {
+            elements.status.innerText = "Preparing Video...";
 
-                    if (!ffmpeg) {
-                        ffmpeg = new FFmpeg();
-                        ffmpeg.on('progress', ({ progress }) => {
-                            if (progress >= 0 && progress <= 1) {
-                                elements.progressBar.style.width = `${40 + progress * 60}%`;
-                                elements.status.innerText = "Trimming & Encoding Video...";
-                            }
-                        });
-                    }
+            const videoEl = document.createElement('video');
+            videoEl.muted = true; // muting only affects local playback volume, not the captured stream
+            videoEl.playsInline = true;
+            videoEl.src = URL.createObjectURL(originalFile);
+            videoEl.style.position = 'fixed';
+            videoEl.style.top = '-9999px'; // keep it rendering (needed for captureStream) but off-screen
+            document.body.appendChild(videoEl);
 
-                    const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
-                    await ffmpeg.load({
-                        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-                    });
-                }
+            const cleanupVideoEl = () => {
+                videoEl.pause();
+                document.body.removeChild(videoEl);
+            };
 
-                elements.status.innerText = "Preparing Video...";
-                const ext = (originalFile.name.split('.').pop() || 'mp4').toLowerCase();
-                const inputName = `input.${ext}`;
-                const outputName = 'output.mp4';
-
-                await ffmpeg.writeFile(inputName, await fetchFile(originalFile));
-
-                // Build a trim+concat filter that keeps only the audible regions, in order.
-                const filterParts = [];
-                let concatRefs = '';
-                regions.forEach((r, i) => {
-                    const start = (r.start / sampleRate).toFixed(3);
-                    const end = (r.end / sampleRate).toFixed(3);
-                    filterParts.push(`[0:v]trim=${start}:${end},setpts=PTS-STARTPTS[v${i}]`);
-                    filterParts.push(`[0:a]atrim=${start}:${end},asetpts=PTS-STARTPTS[a${i}]`);
-                    concatRefs += `[v${i}][a${i}]`;
-                });
-                const filterComplex = `${filterParts.join(';')};${concatRefs}concat=n=${regions.length}:v=1:a=1[outv][outa]`;
-
-                elements.status.innerText = "Trimming & Encoding Video...";
-                await ffmpeg.exec([
-                    '-i', inputName,
-                    '-filter_complex', filterComplex,
-                    '-map', '[outv]', '-map', '[outa]',
-                    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-                    '-c:a', 'aac',
-                    outputName
-                ]);
-
-                const data = await ffmpeg.readFile(outputName);
-                processedBlob = new Blob([data.buffer], { type: 'video/mp4' });
-                const url = URL.createObjectURL(processedBlob);
-
-                elements.videoPlayer.src = url;
-                elements.videoPlayer.classList.remove('hidden');
-                elements.audioPlayer.classList.add('hidden');
-                elements.canvas.classList.add('hidden');
-                elements.progressBar.style.width = '100%';
-                elements.status.innerText = "Success!";
-                elements.resultArea.classList.remove('hidden');
-                elements.downloadBtn.innerText = 'Download MP4';
-
-                // Free ffmpeg's in-memory FS copies of this job's files.
-                await ffmpeg.deleteFile(inputName);
-                await ffmpeg.deleteFile(outputName);
-            } catch (err) {
-                console.error(err);
-                elements.status.innerText = "Error: " + (err && err.message ? err.message : String(err));
+            videoEl.onerror = () => {
+                elements.status.innerText = "Error: Could not play this video file for recording.";
                 elements.controls.classList.remove('hidden');
-                // Deliberately NOT hiding progressArea here -- the status line above
-                // is the only place the real error message is shown.
-            }
+                cleanupVideoEl();
+            };
+
+            videoEl.onloadedmetadata = () => {
+                try {
+                    const stream = videoEl.captureStream ? videoEl.captureStream() : videoEl.mozCaptureStream();
+
+                    const mimeCandidates = ['video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+                    const mimeType = mimeCandidates.find(t => MediaRecorder.isTypeSupported(t)) || '';
+                    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+                    const chunks = [];
+                    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+                    const totalKeptDuration = regions.reduce((acc, r) => acc + (r.end - r.start), 0) / sampleRate;
+                    let idx = 0;
+                    let elapsedBeforeCurrentRegion = 0;
+
+                    const finish = () => {
+                        videoEl.removeEventListener('timeupdate', onTimeUpdate);
+                        recorder.stop();
+                    };
+
+                    const onTimeUpdate = () => {
+                        const region = regions[idx];
+                        const regionEndSec = region.end / sampleRate;
+                        const playedInRegion = videoEl.currentTime - (region.start / sampleRate);
+                        const overallProgress = (elapsedBeforeCurrentRegion + Math.max(0, playedInRegion)) / totalKeptDuration;
+                        elements.progressBar.style.width = `${40 + Math.min(overallProgress, 1) * 60}%`;
+
+                        if (videoEl.currentTime >= regionEndSec) {
+                            elapsedBeforeCurrentRegion += (region.end - region.start) / sampleRate;
+                            idx++;
+                            if (idx >= regions.length) {
+                                finish();
+                                return;
+                            }
+                            videoEl.currentTime = regions[idx].start / sampleRate;
+                        }
+                    };
+
+                    recorder.onstop = () => {
+                        const ext = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
+                        processedBlob = new Blob(chunks, { type: mimeType || 'video/webm' });
+                        const url = URL.createObjectURL(processedBlob);
+
+                        elements.videoPlayer.src = url;
+                        elements.videoPlayer.classList.remove('hidden');
+                        elements.audioPlayer.classList.add('hidden');
+                        elements.canvas.classList.add('hidden');
+                        elements.progressBar.style.width = '100%';
+                        elements.status.innerText = "Success!";
+                        elements.resultArea.classList.remove('hidden');
+                        elements.downloadBtn.innerText = `Download ${ext.toUpperCase()}`;
+                        elements.downloadBtn.dataset.ext = ext;
+                        cleanupVideoEl();
+                    };
+
+                    videoEl.addEventListener('timeupdate', onTimeUpdate);
+                    videoEl.addEventListener('ended', finish);
+                    videoEl.currentTime = regions[0].start / sampleRate;
+
+                    videoEl.onseeked = () => {
+                        elements.status.innerText = "Recording Trimmed Video...";
+                        recorder.start();
+                        videoEl.play();
+                        videoEl.onseeked = null;
+                    };
+                } catch (err) {
+                    console.error(err);
+                    elements.status.innerText = "Error: " + (err && err.message ? err.message : String(err));
+                    elements.controls.classList.remove('hidden');
+                    cleanupVideoEl();
+                }
+            };
         }
 
         function drawWaveform(buffer, regions) {
@@ -467,7 +476,7 @@
             if (!processedBlob) return;
             const link = document.createElement('a');
             link.href = URL.createObjectURL(processedBlob);
-            link.download = isVideoMode ? "processed_video.mp4" : "processed_audio.mp3";
+            link.download = isVideoMode ? `processed_video.${elements.downloadBtn.dataset.ext || 'webm'}` : "processed_audio.mp3";
             link.click();
         };
     </script>
